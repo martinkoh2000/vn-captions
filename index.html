@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>OBS VN Captions</title>
+  <title>OBS Universal VN Captions</title>
   <style>
     body {
       margin: 0;
@@ -11,51 +11,6 @@
       overflow: hidden;
       font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-
-    /* Mic Configuration Bar (Visible inside OBS Interact Window) */
-    .controls {
-      position: absolute;
-      top: 10px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(10, 20, 28, 0.95);
-      border: 1px solid #40E0D0;
-      padding: 8px 15px;
-      border-radius: 6px;
-      z-index: 9999;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .controls label {
-      color: #40E0D0;
-      font-size: 0.85rem;
-      font-weight: bold;
-    }
-    .controls select {
-      background: #0f1923;
-      color: #fff;
-      border: 1px solid #40E0D0;
-      padding: 4px 8px;
-      border-radius: 4px;
-      outline: none;
-    }
-    /* Visual VU Meter */
-    .meter-box {
-      width: 100px;
-      height: 10px;
-      background: #222;
-      border-radius: 3px;
-      overflow: hidden;
-      border: 1px solid #555;
-    }
-    .meter-fill {
-      width: 0%;
-      height: 100%;
-      background: #00FFcc;
-      transition: width 0.05s ease;
-    }
-
     .vn-container {
       position: absolute;
       bottom: 40px;
@@ -112,152 +67,165 @@
       50% { opacity: 0; }
     }
   </style>
-</head>
-<body>
 
-  <!-- Controls overlay -->
-  <div class="controls">
-    <label for="micSelect">Mic:</label>
-    <select id="micSelect"><option>Detecting Mics...</option></select>
-    <div class="meter-box"><div class="meter-fill" id="vuMeter"></div></div>
-  </div>
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.0';
 
-  <div class="vn-container" id="box">
-    <div class="speaker-name" id="speaker-label">Streamer</div>
-    <div class="dialogue-text"><span id="text"></span><span class="cursor"></span></div>
-  </div>
+    // Allow WebAssembly execution inside browser workers
+    env.allowLocalModels = false;
 
-  <script>
-    const micSelect = document.getElementById('micSelect');
-    const vuMeter = document.getElementById('vuMeter');
     const textEl = document.getElementById('text');
     const boxEl = document.getElementById('box');
     
+    let recognizer;
     let targetText = '';
     let currentText = '';
-    let finalTranscript = '';
     let silenceTimer = null;
-    let recognition = null;
-    let audioContext = null;
-    let micStream = null;
+    let isProcessing = false;
+    let audioBuffer = [];
+    
+    const SILENCE_TIMEOUT = 5000;
+    const TYPING_SPEED = 18; // Milliseconds per character
 
-    // Typewriter engine loop
+    // Smooth Typewriter Animation Engine
     function typeLoop() {
       if (currentText.length < targetText.length) {
         currentText += targetText.charAt(currentText.length);
         textEl.textContent = currentText;
       }
-      setTimeout(typeLoop, 18);
+      setTimeout(typeLoop, TYPING_SPEED);
     }
     typeLoop();
 
-    function resetSilenceTimer() {
+    async function init() {
       boxEl.style.opacity = '1';
-      clearTimeout(silenceTimer);
+      textEl.textContent = "Loading WebAssembly Speech Model...";
+
+      try {
+        recognizer = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+        textEl.textContent = "";
+        boxEl.style.opacity = '0';
+        await startListening();
+      } catch (err) {
+        textEl.textContent = "Engine Load Error: " + err.message;
+      }
+    }
+
+    async function startListening() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        
+        // Dynamic Worklet fallback for cross-browser audio capture
+        const blob = new Blob([`
+          class AudioProcessor extends AudioWorkletProcessor {
+            process(inputs) {
+              const input = inputs[0];
+              if (input && input[0]) {
+                this.port.postMessage(input[0]);
+              }
+              return true;
+            }
+          }
+          registerProcessor('audio-processor', AudioProcessor);
+        `], { type: 'application/javascript' });
+
+        const workletUrl = URL.createObjectURL(blob);
+        await audioContext.audioWorklet.addModule(workletUrl);
+
+        const source = audioContext.createMediaStreamSource(stream);
+        const workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+        workletNode.port.onmessage = (e) => {
+          audioBuffer.push(...e.data);
+          processAudioQueue();
+        };
+
+        source.connect(workletNode);
+        workletNode.connect(audioContext.destination);
+      } catch (err) {
+        boxEl.style.opacity = '1';
+        textEl.textContent = "Mic Permission Required: Right-click source -> Interact and allow mic access.";
+      }
+    }
+
+    async function processAudioQueue() {
+      // Process when buffer hits ~2 seconds of audio data (32,000 samples @ 16kHz)
+      if (audioBuffer.length < 32000 || isProcessing) return;
+
+      const chunkToProcess = new Float32Array(audioBuffer);
+      audioBuffer = []; // Clear current buffer for continuous streaming
+
+      // Peak volume gate check
+      let maxVol = 0;
+      for (let i = 0; i < chunkToProcess.length; i++) {
+        const amp = Math.abs(chunkToProcess[i]);
+        if (amp > maxVol) maxVol = amp;
+      }
+
+      // Ignore low ambient room noise
+      if (maxVol < 0.015) return;
+
+      isProcessing = true;
+      try {
+        const output = await recognizer(chunkToProcess, {
+          chunk_length_s: 30,
+          stride_length_s: 3
+        });
+
+        let text = "";
+        if (typeof output === 'string') {
+          text = output;
+        } else if (output && output.text) {
+          text = output.text;
+        }
+
+        text = text.trim();
+
+        // Sanitize noise artifacts
+        if (text && !text.includes("[BLANK_AUDIO]") && text.length > 1) {
+          appendDialogue(text);
+        }
+      } catch (err) {
+        console.error("Inference Error:", err);
+      } finally {
+        isProcessing = false;
+      }
+    }
+
+    function appendDialogue(newPhrase) {
+      boxEl.style.opacity = '1';
       
+      // Accumulate text or append with space
+      if (!targetText) {
+        targetText = newPhrase;
+      } else {
+        targetText += " " + newPhrase;
+      }
+
+      // Limit dialogue container scroll length
+      if (targetText.length > 200) {
+        targetText = targetText.slice(-140);
+        currentText = '';
+      }
+
+      // Reset fade-out timer on speech input
+      clearTimeout(silenceTimer);
       silenceTimer = setTimeout(() => {
-        finalTranscript = '';
         targetText = '';
         currentText = '';
         textEl.textContent = '';
         boxEl.style.opacity = '0';
-      }, 5000);
+      }, SILENCE_TIMEOUT);
     }
 
-    // Initialize microphone hardware enumeration and VU Meter
-    async function initAudioDevice(deviceId = null) {
-      try {
-        if (micStream) {
-          micStream.getTracks().forEach(track => track.stop());
-        }
-
-        const constraints = deviceId ? { audio: { deviceId: { exact: deviceId } } } : { audio: true };
-        micStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-        // Build VU Meter visual feedback
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const analyser = audioContext.createAnalyser();
-        const source = audioContext.createMediaStreamSource(micStream);
-        source.connect(analyser);
-        analyser.fftSize = 64;
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-        function drawVU() {
-          analyser.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          let average = sum / dataArray.length;
-          vuMeter.style.width = Math.min(100, average * 2) + '%';
-          requestAnimationFrame(drawVU);
-        }
-        drawVU();
-
-        // Populate dropdown menu options
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(d => d.kind === 'audioinput');
-        
-        micSelect.innerHTML = '';
-        audioInputs.forEach((device, index) => {
-          const opt = document.createElement('option');
-          opt.value = device.deviceId;
-          opt.text = device.label || `Microphone ${index + 1}`;
-          if (deviceId && device.deviceId === deviceId) opt.selected = true;
-          micSelect.appendChild(opt);
-        });
-
-      } catch (err) {
-        micSelect.innerHTML = '<option>Mic Access Error</option>';
-      }
-    }
-
-    // Handle Dropdown Selection Changes
-    micSelect.addEventListener('change', () => {
-      initAudioDevice(micSelect.value);
-      if (recognition) {
-        recognition.stop(); // Restart engine to pick up new channel stream
-      }
-    });
-
-    // Web Speech API Receiver
-    function startSpeechEngine() {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        textEl.textContent = "Speech recognition engine unavailable in this browser engine.";
-        return;
-      }
-
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onresult = (event) => {
-        resetSilenceTimer();
-        let interimTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript + ' ';
-          } else {
-            interimTranscript += event.results[i][0].transcript;
-          }
-        }
-        targetText = finalTranscript + interimTranscript;
-        
-        if (targetText.length > 220) {
-          finalTranscript = targetText.slice(-160);
-          currentText = '';
-        }
-      };
-
-      recognition.onend = () => recognition.start();
-      recognition.onerror = (e) => {
-        if (e.error !== 'no-speech') setTimeout(() => recognition.start(), 400);
-      };
-
-      recognition.start();
-    }
-
-    initAudioDevice().then(startSpeechEngine);
+    window.addEventListener('load', init);
   </script>
+</head>
+<body>
+  <div class="vn-container" id="box">
+    <div class="speaker-name">Streamer</div>
+    <div class="dialogue-text"><span id="text"></span><span class="cursor"></span></div>
+  </div>
 </body>
 </html>
