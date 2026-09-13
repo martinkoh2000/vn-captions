@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OBS VN Captions</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    .vn-container {
+      position: absolute;
+      bottom: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 82%;
+      max-width: 950px;
+      background: rgba(10, 20, 28, 0.92);
+      border: 2px solid #40E0D0;
+      border-radius: 10px;
+      padding: 22px 28px;
+      box-shadow: 0 0 20px rgba(64, 224, 208, 0.35), inset 0 0 15px rgba(64, 224, 208, 0.1);
+      color: #ffffff;
+      opacity: 0;
+      transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .speaker-name {
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: #40E0D0;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 8px rgba(64, 224, 208, 0.6);
+      display: flex;
+      align-items: center;
+    }
+    .speaker-name::after {
+      content: '';
+      flex-grow: 1;
+      height: 1px;
+      background: linear-gradient(90deg, rgba(64,224,208,0.6), transparent);
+      margin-left: 15px;
+    }
+    .dialogue-text {
+      font-size: 1.45rem;
+      line-height: 1.55;
+      min-height: 2.8em;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .cursor {
+      display: inline-block;
+      width: 10px;
+      height: 1.25em;
+      background-color: #40E0D0;
+      margin-left: 5px;
+      animation: blink 0.8s infinite;
+      vertical-align: middle;
+      box-shadow: 0 0 8px #40E0D0;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="vn-container" id="box">
+    <div class="speaker-name">Medix</div>
+    <div class="dialogue-text"><span id="text"></span><span class="cursor"></span></div>
+  </div>
+
+  <script>
+    const textEl = document.getElementById('text');
+    const boxEl = document.getElementById('box');
+    
+    let fullText = '';
+    let currentText = '';
+    let typingSpeed = 18; // Smoother typewriter speed
+    let silenceTimer = null;
+    const SILENCE_TIMEOUT = 5000;
+
+    function typeLoop() {
+      if (currentText.length < fullText.length) {
+        currentText += fullText.charAt(currentText.length);
+        textEl.textContent = currentText;
+      }
+      setTimeout(typeLoop, typingSpeed);
+    }
+    typeLoop();
+
+    function resetSilenceTimer() {
+      boxEl.style.opacity = '1';
+      clearTimeout(silenceTimer);
+      
+      silenceTimer = setTimeout(() => {
+        fullText = '';
+        currentText = '';
+        textEl.textContent = '';
+        boxEl.style.opacity = '0';
+      }, SILENCE_TIMEOUT);
+    }
+
+    function connectWS() {
+      const ws = new WebSocket("ws://localhost:8765");
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.text) {
+          resetSilenceTimer();
+          
+          fullText += (fullText ? ' ' : '') + data.text;
+          
+          // Truncate oldest sentences when string gets too long for overlay height
+          if (fullText.length > 220) {
+            fullText = fullText.slice(-160);
+            currentText = '';
+          }
+        }
+      };
+
+      ws.onclose = () => {
+        setTimeout(connectWS, 2000);
+      };
+    }
+
+    connectWS();
+  </script>
+</body>
+</html>
