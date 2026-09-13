@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OBS VN Captions</title>
   <style>
     body {
@@ -70,23 +71,31 @@
 </head>
 <body>
   <div class="vn-container" id="box">
-    <div class="speaker-name">Medix</div>
+    <div class="speaker-name" id="speaker-label">Streamer</div>
     <div class="dialogue-text"><span id="text"></span><span class="cursor"></span></div>
   </div>
 
   <script>
+    // Read optional speaker name from URL: ?name=YourName
+    const urlParams = new URLSearchParams(window.location.search);
+    const customName = urlParams.get('name');
+    if (customName) {
+      document.getElementById('speaker-label').textContent = customName;
+    }
+
     const textEl = document.getElementById('text');
     const boxEl = document.getElementById('box');
     
-    let fullText = '';
+    let targetText = '';
     let currentText = '';
-    let typingSpeed = 18; // Smoother typewriter speed
+    let finalTranscript = '';
+    let typingSpeed = 18;
     let silenceTimer = null;
-    const SILENCE_TIMEOUT = 5000;
+    const SILENCE_TIMEOUT = 5000; // 5-second silence buffer
 
     function typeLoop() {
-      if (currentText.length < fullText.length) {
-        currentText += fullText.charAt(currentText.length);
+      if (currentText.length < targetText.length) {
+        currentText += targetText.charAt(currentText.length);
         textEl.textContent = currentText;
       }
       setTimeout(typeLoop, typingSpeed);
@@ -98,37 +107,54 @@
       clearTimeout(silenceTimer);
       
       silenceTimer = setTimeout(() => {
-        fullText = '';
+        finalTranscript = '';
+        targetText = '';
         currentText = '';
         textEl.textContent = '';
         boxEl.style.opacity = '0';
       }, SILENCE_TIMEOUT);
     }
 
-    function connectWS() {
-      const ws = new WebSocket("ws://localhost:8765");
+    // Web Speech API Initialization
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
 
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.text) {
-          resetSilenceTimer();
-          
-          fullText += (fullText ? ' ' : '') + data.text;
-          
-          // Truncate oldest sentences when string gets too long for overlay height
-          if (fullText.length > 220) {
-            fullText = fullText.slice(-160);
-            currentText = '';
+      recognition.onresult = (event) => {
+        resetSilenceTimer();
+        
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript + ' ';
+          } else {
+            interimTranscript += event.results[i][0].transcript;
           }
+        }
+
+        targetText = finalTranscript + interimTranscript;
+        
+        if (targetText.length > 220) {
+          finalTranscript = targetText.slice(-160);
+          currentText = '';
         }
       };
 
-      ws.onclose = () => {
-        setTimeout(connectWS, 2000);
+      // Auto-restart continuous recognition loop if browser drops audio frame
+      recognition.onend = () => recognition.start();
+      recognition.onerror = (e) => {
+        if (e.error !== 'no-speech') {
+          setTimeout(() => recognition.start(), 400);
+        }
       };
-    }
 
-    connectWS();
+      recognition.start();
+    } else {
+      textEl.textContent = "Speech recognition is not supported in this browser version.";
+    }
   </script>
 </body>
 </html>
