@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OBS VN Captions</title>
   <style>
     body {
@@ -10,7 +9,17 @@
       padding: 0;
       background: transparent;
       overflow: hidden;
-      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    #status {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #40E0D0;
+      font-size: 12px;
+      background: rgba(0,0,0,0.7);
+      padding: 4px 8px;
+      border-radius: 4px;
     }
     .vn-container {
       position: absolute;
@@ -23,10 +32,10 @@
       border: 2px solid #40E0D0;
       border-radius: 10px;
       padding: 22px 28px;
-      box-shadow: 0 0 20px rgba(64, 224, 208, 0.35), inset 0 0 15px rgba(64, 224, 208, 0.1);
+      box-shadow: 0 0 20px rgba(64, 224, 208, 0.35);
       color: #ffffff;
-      opacity: 0;
-      transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      opacity: 1; /* Keep visible for testing */
+      transition: opacity 0.4s ease;
     }
     .speaker-name {
       font-size: 1.25rem;
@@ -35,125 +44,57 @@
       margin-bottom: 10px;
       text-transform: uppercase;
       letter-spacing: 2px;
-      text-shadow: 0 0 8px rgba(64, 224, 208, 0.6);
-      display: flex;
-      align-items: center;
-    }
-    .speaker-name::after {
-      content: '';
-      flex-grow: 1;
-      height: 1px;
-      background: linear-gradient(90deg, rgba(64,224,208,0.6), transparent);
-      margin-left: 15px;
     }
     .dialogue-text {
       font-size: 1.45rem;
       line-height: 1.55;
       min-height: 2.8em;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .cursor {
-      display: inline-block;
-      width: 10px;
-      height: 1.25em;
-      background-color: #40E0D0;
-      margin-left: 5px;
-      animation: blink 0.8s infinite;
-      vertical-align: middle;
-      box-shadow: 0 0 8px #40E0D0;
-    }
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0; }
     }
   </style>
 </head>
 <body>
+  <div id="status">Status: Initializing...</div>
+
   <div class="vn-container" id="box">
-    <div class="speaker-name" id="speaker-label">Streamer</div>
-    <div class="dialogue-text"><span id="text"></span><span class="cursor"></span></div>
+    <div class="speaker-name">Streamer</div>
+    <div class="dialogue-text"><span id="text">Waiting for speech...</span></div>
   </div>
 
   <script>
-    // Read optional speaker name from URL: ?name=YourName
-    const urlParams = new URLSearchParams(window.location.search);
-    const customName = urlParams.get('name');
-    if (customName) {
-      document.getElementById('speaker-label').textContent = customName;
-    }
-
+    const statusEl = document.getElementById('status');
     const textEl = document.getElementById('text');
-    const boxEl = document.getElementById('box');
     
-    let targetText = '';
-    let currentText = '';
-    let finalTranscript = '';
-    let typingSpeed = 18;
-    let silenceTimer = null;
-    const SILENCE_TIMEOUT = 5000; // 5-second silence buffer
-
-    function typeLoop() {
-      if (currentText.length < targetText.length) {
-        currentText += targetText.charAt(currentText.length);
-        textEl.textContent = currentText;
-      }
-      setTimeout(typeLoop, typingSpeed);
-    }
-    typeLoop();
-
-    function resetSilenceTimer() {
-      boxEl.style.opacity = '1';
-      clearTimeout(silenceTimer);
-      
-      silenceTimer = setTimeout(() => {
-        finalTranscript = '';
-        targetText = '';
-        currentText = '';
-        textEl.textContent = '';
-        boxEl.style.opacity = '0';
-      }, SILENCE_TIMEOUT);
-    }
-
-    // Web Speech API Initialization
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
+
+    if (!SpeechRecognition) {
+      statusEl.textContent = "Error: Speech Recognition API not supported in this browser.";
+      statusEl.style.color = "#ff4444";
+    } else {
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onresult = (event) => {
-        resetSilenceTimer();
-        
-        let interimTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript + ' ';
-          } else {
-            interimTranscript += event.results[i][0].transcript;
-          }
-        }
-
-        targetText = finalTranscript + interimTranscript;
-        
-        if (targetText.length > 220) {
-          finalTranscript = targetText.slice(-160);
-          currentText = '';
-        }
+      recognition.onstart = () => {
+        statusEl.textContent = "Status: Listening... Speak into your mic!";
+        statusEl.style.color = "#00ff88";
       };
 
-      // Auto-restart continuous recognition loop if browser drops audio frame
-      recognition.onend = () => recognition.start();
       recognition.onerror = (e) => {
-        if (e.error !== 'no-speech') {
-          setTimeout(() => recognition.start(), 400);
-        }
+        statusEl.textContent = "Error: " + e.error;
+        statusEl.style.color = "#ff4444";
       };
 
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          transcript += event.results[i][0].transcript;
+        }
+        textEl.textContent = transcript;
+      };
+
+      recognition.onend = () => recognition.start();
       recognition.start();
-    } else {
-      textEl.textContent = "Speech recognition is not supported in this browser version.";
     }
   </script>
 </body>
