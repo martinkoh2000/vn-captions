@@ -71,7 +71,6 @@
   <script type="module">
     import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.0';
 
-    // Allow WebAssembly execution inside browser workers
     env.allowLocalModels = false;
 
     const textEl = document.getElementById('text');
@@ -83,11 +82,12 @@
     let silenceTimer = null;
     let isProcessing = false;
     let audioBuffer = [];
+    let audioContext;
     
     const SILENCE_TIMEOUT = 5000;
-    const TYPING_SPEED = 18; // Milliseconds per character
+    const TYPING_SPEED = 18;
 
-    // Smooth Typewriter Animation Engine
+    // Typewriter engine loop
     function typeLoop() {
       if (currentText.length < targetText.length) {
         currentText += targetText.charAt(currentText.length);
@@ -97,83 +97,90 @@
     }
     typeLoop();
 
-    async function init() {
+    async function initEngine() {
       boxEl.style.opacity = '1';
-      textEl.textContent = "Loading WebAssembly Speech Model...";
+      textEl.textContent = "Click anywhere inside OBS Interact mode to enable microphone audio...";
 
+      // AudioContext unlock on click/interaction
+      const unlockAudio = async () => {
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        }
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        
+        textEl.textContent = "Loading AI Speech Model (Transformers.js)...";
+        window.removeEventListener('click', unlockAudio);
+        loadModel();
+      };
+
+      window.addEventListener('click', unlockAudio);
+    }
+
+    async function loadModel() {
       try {
         recognizer = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
-        textEl.textContent = "";
-        boxEl.style.opacity = '0';
-        await startListening();
+        textEl.textContent = "AI Ready! Speak into your microphone.";
+        
+        setTimeout(() => {
+          textEl.textContent = "";
+          boxEl.style.opacity = '0';
+        }, 2000);
+
+        await startAudioStream();
       } catch (err) {
-        textEl.textContent = "Engine Load Error: " + err.message;
+        textEl.textContent = "Engine Error: " + err.message;
       }
     }
 
-    async function startListening() {
+    async function startAudioStream() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-        
-        // Dynamic Worklet fallback for cross-browser audio capture
-        const blob = new Blob([`
-          class AudioProcessor extends AudioWorkletProcessor {
-            process(inputs) {
-              const input = inputs[0];
-              if (input && input[0]) {
-                this.port.postMessage(input[0]);
-              }
-              return true;
-            }
-          }
-          registerProcessor('audio-processor', AudioProcessor);
-        `], { type: 'application/javascript' });
-
-        const workletUrl = URL.createObjectURL(blob);
-        await audioContext.audioWorklet.addModule(workletUrl);
-
         const source = audioContext.createMediaStreamSource(stream);
-        const workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+        
+        // Robust ScriptProcessor fallback to bypass strict worker policies
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-        workletNode.port.onmessage = (e) => {
-          audioBuffer.push(...e.data);
-          processAudioQueue();
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          audioBuffer.push(...inputData);
+          
+          // Check audio buffer roughly every 2 seconds (32000 samples)
+          if (audioBuffer.length >= 32000) {
+            processAudioChunk();
+          }
         };
 
-        source.connect(workletNode);
-        workletNode.connect(audioContext.destination);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
       } catch (err) {
         boxEl.style.opacity = '1';
-        textEl.textContent = "Mic Permission Required: Right-click source -> Interact and allow mic access.";
+        textEl.textContent = "Mic Permission Denied: Right-click source -> Interact -> Allow Mic";
       }
     }
 
-    async function processAudioQueue() {
-      // Process when buffer hits ~2 seconds of audio data (32,000 samples @ 16kHz)
-      if (audioBuffer.length < 32000 || isProcessing) return;
+    async function processAudioChunk() {
+      if (isProcessing || audioBuffer.length < 32000) return;
 
-      const chunkToProcess = new Float32Array(audioBuffer);
-      audioBuffer = []; // Clear current buffer for continuous streaming
+      const samples = new Float32Array(audioBuffer);
+      audioBuffer = []; // Reset queue for smooth stream
 
-      // Peak volume gate check
+      // Volume threshold gate
       let maxVol = 0;
-      for (let i = 0; i < chunkToProcess.length; i++) {
-        const amp = Math.abs(chunkToProcess[i]);
-        if (amp > maxVol) maxVol = amp;
+      for (let i = 0; i < samples.length; i++) {
+        const vol = Math.abs(samples[i]);
+        if (vol > maxVol) maxVol = vol;
       }
 
-      // Ignore low ambient room noise
-      if (maxVol < 0.015) return;
+      // Skip quiet background noise
+      if (maxVol < 0.012) return;
 
       isProcessing = true;
       try {
-        const output = await recognizer(chunkToProcess, {
-          chunk_length_s: 30,
-          stride_length_s: 3
-        });
-
+        const output = await recognizer(samples);
         let text = "";
+
         if (typeof output === 'string') {
           text = output;
         } else if (output && output.text) {
@@ -182,34 +189,30 @@
 
         text = text.trim();
 
-        // Sanitize noise artifacts
         if (text && !text.includes("[BLANK_AUDIO]") && text.length > 1) {
-          appendDialogue(text);
+          displayDialogue(text);
         }
       } catch (err) {
-        console.error("Inference Error:", err);
+        console.error("Transcription error:", err);
       } finally {
         isProcessing = false;
       }
     }
 
-    function appendDialogue(newPhrase) {
+    function displayDialogue(newPhrase) {
       boxEl.style.opacity = '1';
       
-      // Accumulate text or append with space
       if (!targetText) {
         targetText = newPhrase;
       } else {
         targetText += " " + newPhrase;
       }
 
-      // Limit dialogue container scroll length
       if (targetText.length > 200) {
         targetText = targetText.slice(-140);
         currentText = '';
       }
 
-      // Reset fade-out timer on speech input
       clearTimeout(silenceTimer);
       silenceTimer = setTimeout(() => {
         targetText = '';
@@ -219,7 +222,7 @@
       }, SILENCE_TIMEOUT);
     }
 
-    window.addEventListener('load', init);
+    window.addEventListener('load', initEngine);
   </script>
 </head>
 <body>
